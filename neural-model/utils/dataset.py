@@ -6,7 +6,7 @@ import gc
 import time
 import ujson as json
 import tarfile
-from typing import Iterable, List, Dict, Union, Tuple
+from typing import Iterable, List, Dict, Union, Tuple, Iterator
 import multiprocessing
 import threading
 import queue
@@ -284,7 +284,47 @@ class Batcher(object):
                     target_variable_encoding_indices_mask=target_variable_encoding_indices_mask)
 
 
-def get_json_iterator_from_tar_file(file_paths, shuffle=False, progress=False, group_by=None, buffer=True) -> Iterable:
+def get_jsonl_files(path: str, progress: bool = False) -> Iterator[Tuple[str, Iterator[str]]]:
+    r"""Returns the contents of each file from a directory or a TAR archive.
+
+    :param path: Path to the directory or TAR archive.
+    :param progress: If ``True``, show a progress bar.
+    :return: An iterator over tuples containing the file name and contents of each file.
+    """
+    if os.path.isdir(path):
+        files = [file for file in os.listdir(path) if file.endswith(".jsonl")]
+        if progress:
+            files = tqdm(files)
+        for file in files:
+            with open(os.path.join(path, file), 'r') as f:
+                yield file, f
+    elif os.path.isfile(path) and path.endswith(".tar"):
+        with tarfile.open(path, 'r') as tar:
+            files = [file for file in tar.getmembers() if file.name.endswith(".jsonl")]
+            if progress:
+                files = tqdm(files)
+            for file in files:
+                contents = tar.extractfile(file.name)
+                if contents is not None:
+                    yield file.name, contents
+    else:
+        raise ValueError("The provided path is neither a directory nor a TAR file")
+
+
+
+def get_json_iterator_from_tar_file(file_paths, shuffle=False, progress=False, group_by=None, buffer=True):
+    r"""Create an iterator over JSON lines from a TAR archive.
+
+    :param file_paths: Path (or list of paths) to the TAR archive(s).
+    :param shuffle: If ``True``, the JSON lines are returned in random order.
+    :param progress: If ``True``, a progress bar will be shown.
+    :param group_by: If ``None``, individual lines are returned. If ``"binary_file"``, all lines in a single binary
+        (one JSON file) are returned in a list.
+    :param buffer:
+    :return: An iterator over JSON lines. Each line is represented by a pair: the JSON line as a string, and a
+        meta-info dictionary containing file name and line number.
+    """
+
     assert group_by in (None, 'binary_file')
 
     # if shuffle:
@@ -298,31 +338,22 @@ def get_json_iterator_from_tar_file(file_paths, shuffle=False, progress=False, g
     for file_path in file_paths:
         payloads = []
         t1 = time.time()
-        with tarfile.open(file_path, 'r') as f:
-            files = [x.name for x in f.getmembers() if x.name.endswith('.jsonl')]
-            # if shuffle:
-            #     np.random.shuffle(files)
 
-            if progress: file_iter = tqdm(files, file=sys.stdout)
-            else: file_iter = files
+        for filename, jsonl_file in get_jsonl_files(file_path, progress=progress):
+            if group_by is None:
+                for line_no, tree_encoding_line in enumerate(jsonl_file):
+                    # if tree_encoding_line.decode().startswith('{'):
+                    # tree_json_dict = json.loads(tree_encoding_line)
+                    payload = tree_encoding_line, dict(file_name=filename, line_num=line_no)
+                    if buffer:
+                        payloads.append(payload)
+                    else:
+                        yield payload
 
-            for filename in file_iter:
-                jsonl_file = f.extractfile(filename)
-                if jsonl_file is not None:
-                    if group_by is None:
-                        for line_no, tree_encoding_line in enumerate(jsonl_file):
-                            # if tree_encoding_line.decode().startswith('{'):
-                            # tree_json_dict = json.loads(tree_encoding_line)
-                            payload = tree_encoding_line, dict(file_name=filename, line_num=line_no)
-                            if buffer:
-                                payloads.append(payload)
-                            else:
-                                yield payload
-
-                    elif group_by == 'binary_file':
-                        lines = [(l.decode().strip(), dict(file_name=filename, line_num=line_no))
-                                 for line_no, l in enumerate(jsonl_file)]
-                        yield lines
+            elif group_by == 'binary_file':
+                lines = [(l.strip(), dict(file_name=filename, line_num=line_no))
+                         for line_no, l in enumerate(jsonl_file)]
+                yield lines
 
         if shuffle:
             np.random.shuffle(payloads)

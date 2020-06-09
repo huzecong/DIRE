@@ -12,24 +12,22 @@ Options:
 
 import glob
 import multiprocessing
+import os
 import random
 import tarfile
-from collections import Iterable
-from typing import Tuple
-import ujson as json
+import traceback
+from collections import defaultdict
 
-from docopt import docopt
-import os, sys
-from multiprocessing import Process
 import numpy as np
-
-from utils.ast import SyntaxNode
-from utils.code_processing import canonicalize_code, annotate_type, canonicalize_constants, preprocess_ast, \
-    tokenize_raw_code
-from utils.dataset import Example, json_line_reader
+import ujson as json
+from docopt import docopt
 from tqdm import tqdm
 
-all_functions = dict()  # indexed by binaries
+from utils.ast import SyntaxNode
+from utils.code_processing import canonicalize_code, preprocess_ast, tokenize_raw_code
+from utils.dataset import Example, json_line_reader
+
+all_functions = defaultdict(dict)  # indexed by binaries
 
 
 def is_valid_example(example):
@@ -51,31 +49,36 @@ def example_generator(json_queue, example_queue, args, consumer_num=1):
 
         examples = []
         for json_str, meta in payload:
-            tree_json_dict = json.loads(json_str)
+            try:
+                tree_json_dict = json.loads(json_str)
 
-            root = SyntaxNode.from_json_dict(tree_json_dict['ast'])
-            # root_reconstr = SyntaxNode.from_json_dict(root.to_json_dict())
-            # assert root == root_reconstr
+                root = SyntaxNode.from_json_dict(tree_json_dict['ast'])
+                # root_reconstr = SyntaxNode.from_json_dict(root.to_json_dict())
+                # assert root == root_reconstr
 
-            preprocess_ast(root, code=tree_json_dict['raw_code'])
-            code_tokens = tokenize_raw_code(tree_json_dict['raw_code'])
-            tree_json_dict['code_tokens'] = code_tokens
+                preprocess_ast(root, code=tree_json_dict['raw_code'])
+                code_tokens = tokenize_raw_code(tree_json_dict['raw_code'])
+                tree_json_dict['code_tokens'] = code_tokens
 
-            # add function name to the name field of the root block
-            root.name = tree_json_dict['function']
-            root.named_fields.add('name')
+                # add function name to the name field of the root block
+                root.name = tree_json_dict['function']
+                root.named_fields.add('name')
 
-            new_json_dict = root.to_json_dict()
-            tree_json_dict['ast'] = new_json_dict
-            json_str = json.dumps(tree_json_dict)
+                new_json_dict = root.to_json_dict()
+                tree_json_dict['ast'] = new_json_dict
+                json_str = json.dumps(tree_json_dict)
 
-            example = Example.from_json_dict(tree_json_dict, binary_file=meta, json_str=json_str)
+                example = Example.from_json_dict(tree_json_dict, binary_file=meta, json_str=json_str)
 
-            is_valid = is_valid_example(example) if enable_filter else True
-            if is_valid:
-                canonical_code = canonicalize_code(example.ast.code)
-                example.canonical_code = canonical_code
-                examples.append(example)
+                is_valid = is_valid_example(example) if enable_filter else True
+                if is_valid:
+                    canonical_code = canonicalize_code(example.ast.code)
+                    example.canonical_code = canonical_code
+                    examples.append(example)
+            except ValueError as e:
+                print(f"Exception occurred when processing line {meta['line_num']} of file {meta['file_name']}:")
+                print(f"<{e.__class__.__name__}> {e}")
+                traceback.print_exc()
 
         example_queue.put(examples)
 
@@ -108,8 +111,9 @@ def main(args):
         json_enc_queue = multiprocessing.Queue()
         example_queue = multiprocessing.Queue(maxsize=2000)
 
-        json_loader = multiprocessing.Process(target=json_line_reader,
-                                              args=(os.path.expanduser(tar_file), json_enc_queue, num_workers, False, False, 'binary_file'))
+        json_loader = multiprocessing.Process(
+            target=json_line_reader,
+            args=(os.path.expanduser(tar_file), json_enc_queue, num_workers, False, False, 'binary_file'))
         json_loader.daemon = True
         json_loader.start()
 
@@ -121,6 +125,7 @@ def main(args):
             example_generators.append(p)
 
         n_finished = 0
+        progress = tqdm(total=173026)
         while True:
             payload = example_queue.get()
             if payload is None:
@@ -129,6 +134,7 @@ def main(args):
                 if n_finished == num_workers: break
                 continue
 
+            progress.update(1)
             examples = payload
 
             if examples:
@@ -136,9 +142,10 @@ def main(args):
                 with open(os.path.join(tgt_folder, 'files/', json_file_name), 'w') as f:
                     for example in examples:
                         f.write(example.json_str + '\n')
-                        all_functions.setdefault(json_file_name, dict())[example.ast.compilation_unit] = example.canonical_code
+                        all_functions[json_file_name][example.ast.compilation_unit] = example.canonical_code
 
                 valid_example_count += len(examples)
+        progress.close()
 
         print('valid examples: ', valid_example_count)
 
@@ -160,7 +167,8 @@ def main(args):
     if test_file:
         print(f'using test file {test_file}')
         with tarfile.open(test_file, 'r') as f:
-            test_files = [os.path.join(file_prefix, x.name.split('/')[-1]) for x in f.getmembers() if x.name.endswith('.jsonl')]
+            test_files = [os.path.join(file_prefix, x.name.split('/')[-1])
+                          for x in f.getmembers() if x.name.endswith('.jsonl')]
         dev_file_num = 0
     else:
         print(f'randomly sample test file {test_file}')
@@ -178,11 +186,11 @@ def main(args):
     dev_files = train_files[-dev_file_num:]
     train_files = train_files[:-dev_file_num]
 
-    train_functions = dict()
+    train_functions = defaultdict(set)
     for train_file in train_files:
         file_name = train_file.split('/')[-1]
         for func_name, func in all_functions[file_name].items():
-            train_functions.setdefault(func_name, set()).add(func)
+            train_functions[func_name].add(func)
 
     print(f'number training: {len(train_files)}, number dev: {len(dev_files)}, number test: {len(test_files)}')
     print('dump training files')
