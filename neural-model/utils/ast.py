@@ -1,18 +1,16 @@
 from collections import OrderedDict
 from io import StringIO
-import ujson as json
-from typing import Dict, List
-import numpy as np
+from typing import Any, Dict, List, Optional
 
-import torch
+import ujson as json
 
 from utils.util import cached_property
-from utils.vocab import VocabEntry
 
 
 class SyntaxNode(object):
     """represent a node on an AST"""
-    def __init__(self, node_id, node_type, address=None, children: List=None, named_fields: Dict=None):
+    def __init__(self, node_id, node_type, address=None, children: Optional[List['SyntaxNode']] = None,
+                 named_fields: Dict[str, Any] = None):
         self.node_id = node_id
         self.node_type = node_type
         self.address = address
@@ -34,8 +32,9 @@ class SyntaxNode(object):
         child.parent = self
 
     @classmethod
-    def from_json_dict(cls, json_dict: Dict) -> 'SyntaxNode':
-        named_fields = {k: v for k, v in json_dict.items() if k not in {'node_id', 'node_type', 'children', 'address', 'x', 'y', 'z'}}
+    def from_json_dict(cls, json_dict: Dict[str, Any]) -> 'SyntaxNode':
+        named_fields = {k: v for k, v in json_dict.items()
+                        if k not in {'node_id', 'node_type', 'children', 'address', 'x', 'y', 'z'}}
 
         if 'x' in json_dict:
             named_fields['x'] = SyntaxNode.from_json_dict(json_dict['x'])

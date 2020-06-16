@@ -6,7 +6,7 @@ import gc
 import time
 import ujson as json
 import tarfile
-from typing import Iterable, List, Dict, Union, Tuple, Iterator
+from typing import Iterable, List, Dict, Union, Tuple, Iterator, Any
 import multiprocessing
 import threading
 import queue
@@ -36,6 +36,14 @@ resource.setrlimit(resource.RLIMIT_NOFILE, (4096, rlimit[1]))
 
 
 class Example(object):
+    binary_file: Dict[str, Any]
+    code_tokens: List[str]
+    sub_tokens: List[str]
+    sub_token_ids: List[int]
+    source_seq_length: int
+    variable_name_subtoken_map: Dict[str, List[str]]
+    target_prediction_seq_length: int
+
     def __init__(self, ast: AbstractSyntaxTree, variable_name_map: dict, **kwargs):
         self.ast = ast
         self.variable_name_map = variable_name_map
@@ -100,9 +108,9 @@ class Batcher(object):
             snippet = ' '.join(snippet)
             sub_tokens = ['<s>'] + src_bpe_model.encode_as_pieces(snippet) + ['</s>']
             sub_token_ids = [src_bpe_model.bos_id()] + src_bpe_model.encode_as_ids(snippet) + [src_bpe_model.eos_id()]
-            setattr(example, 'sub_tokens', sub_tokens)
-            setattr(example, 'sub_token_ids', sub_token_ids)
-            setattr(example, 'source_seq_length', len(sub_tokens))
+            example.sub_tokens = sub_tokens
+            example.sub_token_ids = sub_token_ids
+            example.source_seq_length = len(sub_tokens)
 
         tgt_bpe_model = self.vocab.target.subtoken_model
         eov_id = tgt_bpe_model.eos_id()
@@ -116,10 +124,8 @@ class Batcher(object):
             variable_name_subtoken_map[old_name] = subtoken_ids
             tgt_pred_seq_len += len(subtoken_ids)
 
-        setattr(example, 'variable_name_subtoken_map', variable_name_subtoken_map)
-        setattr(example, 'target_prediction_seq_length', tgt_pred_seq_len)
-
-        return example
+        example.variable_name_subtoken_map = variable_name_subtoken_map
+        example.target_prediction_seq_length = tgt_pred_seq_len
 
     def sort_training_examples(self, examples):
         def _key(_example):
@@ -167,8 +173,9 @@ class Batcher(object):
         elif self.config['encoder']['type'] == 'SequentialEncoder':
             tensor_dict = SequentialEncoder.to_tensor_dict(examples)
         elif self.config['encoder']['type'] == 'HybridEncoder':
-            packed_graph, gnn_tensor_dict = GraphASTEncoder.to_packed_graph([e.ast for e in examples],
-                                                                            connections=self.config['encoder']['graph_encoder']['connections'])
+            packed_graph, gnn_tensor_dict = GraphASTEncoder.to_packed_graph(
+                [e.ast for e in examples],
+                connections=self.config['encoder']['graph_encoder']['connections'])
             gnn_tensors = GraphASTEncoder.to_tensor_dict(packed_graph, self.grammar, self.vocab)
             gnn_tensor_dict.update(gnn_tensors)
 
@@ -260,7 +267,8 @@ class Batcher(object):
                 new_var_name_subtoken_ids = variable_name_subtoken_maps[e_id][var_name]
                 variable_end_ptr = variable_ptr + len(new_var_name_subtoken_ids)
 
-                variable_tgt_name_id[e_id, variable_ptr: variable_end_ptr] = torch.tensor(new_var_name_subtoken_ids, dtype=torch.long)
+                variable_tgt_name_id[e_id, variable_ptr: variable_end_ptr] = torch.tensor(
+                    new_var_name_subtoken_ids, dtype=torch.long)
 
                 if var_name == var_name_map[var_name]:
                     auxiliary_var_mask[e_id, variable_ptr: variable_end_ptr] = 1.
@@ -401,7 +409,8 @@ def example_generator(json_queue, example_queue, consumer_num=1):
     # print('[Example Generator] example generator process quit!')
 
 
-def example_to_batch(json_queue, batched_examples_queue, batch_size, train, config, worker_manager_lock, return_examples=False, return_prediction_target=True):
+def example_to_batch(json_queue, batched_examples_queue, batch_size, train, config, worker_manager_lock,
+                     return_examples=False, return_prediction_target=True, compressed=False):
     batcher = Batcher(config, train)
 
     buffer_size = config['train']['buffer_size']
@@ -430,7 +439,8 @@ def example_to_batch(json_queue, batched_examples_queue, batch_size, train, conf
             random.shuffle(batches)
 
         for batch_examples in batches:
-            batch = batcher.to_batch(batch_examples, return_examples=return_examples, return_prediction_target=return_prediction_target)
+            batch = batcher.to_batch(batch_examples, return_examples=return_examples,
+                                     return_prediction_target=return_prediction_target)
             # while batched_examples_queue.qsize() > 100:
             #     time.sleep(10)
             # print(batch.tensor_dict['num_elements'])
@@ -507,7 +517,8 @@ def worker_manager(worker_result_queue, out_queue, num_workers, worker_manager_l
             while not worker_result_queue.empty() and i < buffer_size:
                 batch = worker_result_queue.get()
 
-                # print(f'[LocalWorkerManager] {time.time() - t0} took to load a batch, size={worker_result_queue.qsize()}', file=sys.stderr)
+                # print(f'[LocalWorkerManager] {time.time() - t0} took to load a batch, '
+                #       f'size={worker_result_queue.qsize()}', file=sys.stderr)
                 if batch is not None:
                     out_queue.put(batch)
                 else:
@@ -612,9 +623,12 @@ class Dataset(object):
         if single_batcher:
             return it_func(self._single_process_batch_iter(batch_size, config, num_readers, train))
         else:
-            return it_func(self._batch_iterator(batch_size, config, num_readers, num_batchers, train, return_examples, return_prediction_target))
+            return it_func(self._batch_iterator(
+                batch_size, config, num_readers, num_batchers, train,
+                return_examples, return_prediction_target))
 
-    def _batch_iterator(self, batch_size: int, config: Dict, num_readers, num_batchers, train=False, return_examples=False, return_prediction_target=None) -> Iterable[Batch]:
+    def _batch_iterator(self, batch_size: int, config: Dict, num_readers, num_batchers, train=False,
+                        return_examples=False, return_prediction_target=None) -> Iterable[Batch]:
         global batcher_sync_msg
         batcher_sync_msg = multiprocessing.Value('i', 0)
         json_enc_queue = multiprocessing.Queue(maxsize=10000)
@@ -631,8 +645,10 @@ class Dataset(object):
             return_prediction_target = train
 
         for i in range(num_readers):
-            p = multiprocessing.Process(target=example_to_batch,
-                                        args=(json_enc_queue, worker_result_queue, batch_size, train, config, worker_manager_lock, return_examples, return_prediction_target))
+            p = multiprocessing.Process(
+                target=example_to_batch,
+                args=(json_enc_queue, worker_result_queue, batch_size, train, config, worker_manager_lock,
+                      return_examples, return_prediction_target))
             p.daemon = True
             example_generators.append(p)
 
@@ -640,7 +656,9 @@ class Dataset(object):
         for p in example_generators: p.start()
 
         batch_queue = queue.Queue(maxsize=100)
-        worker_manager_thread = threading.Thread(target=worker_manager, args=(worker_result_queue, batch_queue, num_readers, worker_manager_lock, 100))
+        worker_manager_thread = threading.Thread(
+            target=worker_manager,
+            args=(worker_result_queue, batch_queue, num_readers, worker_manager_lock, 100))
         worker_manager_thread.start()
 
         while True:

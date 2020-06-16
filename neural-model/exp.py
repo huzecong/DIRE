@@ -101,7 +101,8 @@ def train(args):
         train_set_iter = train_set.batch_iterator(batch_size=batch_size,
                                                   return_examples=False,
                                                   config=config, progress=True, train=True,
-                                                  num_readers=config['train']['num_readers'], num_batchers=config['train']['num_batchers'])
+                                                  num_readers=config['train']['num_readers'],
+                                                  num_batchers=config['train']['num_batchers'])
         epoch += 1
 
         for batch in train_set_iter:
@@ -191,7 +192,8 @@ def test(args):
 
     print(eval_results, file=sys.stderr)
 
-    save_to = args['--save-to'] if args['--save-to'] else args['MODEL_FILE'] + f'.{test_set_path.split("/")[-1]}.decode_results.bin'
+    save_to = (args['--save-to'] if args['--save-to']
+               else args['MODEL_FILE'] + f'.{test_set_path.split("/")[-1]}.decode_results.bin')
     print(f'Save decode results to {save_to}', file=sys.stderr)
     pickle.dump(decode_results, open(save_to, 'wb'))
 
