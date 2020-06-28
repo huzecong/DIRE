@@ -90,6 +90,7 @@ class ParseState(flutes.PoolState):
                     if tokenized_code in self.code_set:
                         self.duplicate += 1
                         continue
+                    self.code_set.add(tokenized_code)
 
                     ast = json_dict['ast']
                     var_map = preprocess_ast(ast, code=raw_code)

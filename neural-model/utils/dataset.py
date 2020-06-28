@@ -28,7 +28,7 @@ import torch.multiprocessing as torch_mp
 
 batcher_sync_msg = None
 
-torch.multiprocessing.set_sharing_strategy('file_system')
+# torch.multiprocessing.set_sharing_strategy('file_system')
 
 import resource
 rlimit = resource.getrlimit(resource.RLIMIT_NOFILE)
@@ -90,7 +90,8 @@ class Batcher(object):
 
         self.use_seq_encoder = config['encoder']['type'] == 'SequentialEncoder'
         self.use_hybrid_encoder = config['encoder']['type'] == 'HybridEncoder'
-        self.init_gnn_with_seq_encoding = config['encoder']['type'] == 'GraphASTEncoder' and config['encoder']['init_with_seq_encoding']
+        self.init_gnn_with_seq_encoding = (config['encoder']['type'] == 'GraphASTEncoder' and
+                                           config['encoder']['init_with_seq_encoding'])
 
     @property
     def annotate_sequential_input(self):

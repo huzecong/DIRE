@@ -7,6 +7,7 @@ Usage:
 
 Options:
     -h --help                                   Show this screen
+    --compressed                                Load dataset in compressed format
     --cuda                                      Use GPU
     --debug                                     Debug mode
     --seed=<int>                                Seed [default: 0]
@@ -38,6 +39,7 @@ from model.gnn import AdjacencyList, GatedGraphNeuralNetwork
 from model.model import RenamingModel
 from utils import nn_util, util
 from utils.ast import AbstractSyntaxTree
+from utils.data_compress import CompressedDataset
 from utils.dataset import Dataset, Example
 from utils.evaluation import Evaluator
 from utils.vocab import Vocab, VocabEntry
@@ -47,6 +49,11 @@ import os
 # os.environ['CUDA_VISIBLE_DEVICES'] = '2'
 # os.environ['GPU_DEBUG'] = '2'
 # from gpu_profile import gpu_profile
+
+
+def log(msg: str) -> None:
+    time_str = time.strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{time_str}] {msg}", flush=True, file=sys.stderr)
 
 
 def train(args):
@@ -79,7 +86,10 @@ def train(args):
     # set the padding index for embedding layers to zeros
     # model.encoder.var_node_name_embedding.weight[0].fill_(0.)
 
-    train_set = Dataset(config['data']['train_file'])
+    if args['--compressed']:
+        train_set = CompressedDataset(config['data']['train_file'], random_seed=int(args['--seed']))
+    else:
+        train_set = Dataset(config['data']['train_file'])
     dev_set = Dataset(config['data']['dev_file'])
     batch_size = config['train']['batch_size']
 
@@ -89,11 +99,42 @@ def train(args):
     train_iter = epoch = cum_examples = 0
     log_every = config['train']['log_every']
     evaluate_every_nepoch = config['train']['evaluate_every_nepoch']
+    evaluate_every_niter = config['train'].get('evaluate_every_niter', 0)
     max_epoch = config['train']['max_epoch']
     max_patience = config['train']['patience']
     cum_loss = 0.
     patience = 0.
     t_log = time.time()
+
+    def validate():
+        nonlocal patience
+        log(f'[Learner] Perform evaluation')
+        t1 = time.time()
+        # ppl = Evaluator.evaluate_ppl(model, dev_set, config, predicate=lambda e: not e['function_body_in_train'])
+        eval_results, decode_results = Evaluator.decode_and_evaluate(model, dev_set, config, return_results=True)
+
+        save_to = (args['--save-to'] if args['--save-to']
+                   else args['MODEL_FILE'] + f".{config['data']['dev_file'].split('/')[-1]}.decode_results.bin")
+        print(f'Save decode results to {save_to}', file=sys.stderr)
+        pickle.dump(decode_results, open(save_to, 'wb'))
+
+        # print(f'[Learner] Evaluation result ppl={ppl} (took {time.time() - t1}s)', file=sys.stderr)
+        log(f'[Learner] Evaluation result {eval_results} (took {time.time() - t1}s)')
+        dev_metric = eval_results['func_body_not_in_train_acc']['accuracy']
+        # dev_metric = -ppl
+        if len(history_accs) == 0 or dev_metric > max(history_accs):
+            patience = 0
+            model_save_path = os.path.join(work_dir, f'model.bin')
+            model.save(model_save_path)
+            log(f'[Learner] Saved currently the best model to {model_save_path}')
+        else:
+            patience += 1
+            if patience == max_patience:
+                log(f'[Learner] Reached max patience {max_patience}, exiting...')
+                patience = 0
+                exit()
+
+        history_accs.append(dev_metric)
 
     history_accs = []
     while True:
@@ -131,42 +172,23 @@ def train(args):
             del loss
 
             if train_iter % log_every == 0:
-                print(f'[Learner] train_iter={train_iter} avg. loss={cum_loss / cum_examples}, '
-                      f'{cum_examples} examples ({cum_examples / (time.time() - t_log)} examples/s)', file=sys.stderr)
+                log(f'[Learner] train_iter={train_iter} avg. loss={cum_loss / cum_examples}, '
+                    f'{cum_examples} examples ({cum_examples / (time.time() - t_log)} examples/s)')
 
                 cum_loss = cum_examples = 0.
                 t_log = time.time()
 
-        print(f'[Learner] Epoch {epoch} finished', file=sys.stderr)
+            if evaluate_every_niter > 0 and train_iter % evaluate_every_niter == 0:
+                validate()
 
-        if epoch % evaluate_every_nepoch == 0:
-            print(f'[Learner] Perform evaluation', file=sys.stderr)
-            t1 = time.time()
-            # ppl = Evaluator.evaluate_ppl(model, dev_set, config, predicate=lambda e: not e['function_body_in_train'])
-            eval_results = Evaluator.decode_and_evaluate(model, dev_set, config)
-            # print(f'[Learner] Evaluation result ppl={ppl} (took {time.time() - t1}s)', file=sys.stderr)
-            print(f'[Learner] Evaluation result {eval_results} (took {time.time() - t1}s)', file=sys.stderr)
-            dev_metric = eval_results['func_body_not_in_train_acc']['accuracy']
-            # dev_metric = -ppl
-            if len(history_accs) == 0 or dev_metric > max(history_accs):
-                patience = 0
-                model_save_path = os.path.join(work_dir, f'model.bin')
-                model.save(model_save_path)
-                print(f'[Learner] Saved currently the best model to {model_save_path}', file=sys.stderr)
-            else:
-                patience += 1
-                if patience == max_patience:
-                    print(f'[Learner] Reached max patience {max_patience}, exiting...', file=sys.stderr)
-                    patience = 0
-                    exit()
+        log(f'[Learner] Epoch {epoch} finished')
 
-            history_accs.append(dev_metric)
+        if evaluate_every_nepoch > 0 and epoch % evaluate_every_nepoch == 0:
+            validate()
 
         if epoch == max_epoch:
-            print(f'[Learner] Reached max epoch', file=sys.stderr)
+            log(f'[Learner] Reached max epoch')
             exit()
-
-        t1 = time.time()
 
 
 def test(args):
